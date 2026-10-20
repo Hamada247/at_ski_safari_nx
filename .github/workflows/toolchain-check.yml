@@ -1,5 +1,10 @@
 name: Toolchain check
 
+# Step 0: builds libnx32 and mesa32 (the 32-bit Switch libraries) in the same
+# Docker toolchain the existing ports use, then compile-checks the android32
+# runtime against them. No game code and no game files are involved.
+# Start it by hand: Actions tab -> "Toolchain check" -> Run workflow.
+
 on:
   workflow_dispatch:
 
@@ -22,8 +27,20 @@ jobs:
           git clone --depth 1 https://github.com/aks796/mesa32 work/mesa32
           git clone --depth 1 https://github.com/aks796/android32 work/runtime
 
-      - name: Let the container write to the folders
-        run: chmod -R a+rwX work
+      - name: Run containers as root
+        run: |
+          mkdir -p "$HOME/bin"
+          cat > "$HOME/bin/docker" <<'WRAP'
+          #!/bin/sh
+          if [ "$1" = "run" ]; then
+            shift
+            exec /usr/bin/docker run --user root "$@"
+          fi
+          exec /usr/bin/docker "$@"
+          WRAP
+          chmod +x "$HOME/bin/docker"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          chmod -R a+rwX work
 
       - name: Cache key
         id: shas
@@ -45,6 +62,12 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: docker pull --platform linux/amd64 ghcr.io/vita2hos/devcontainer/vita2hos:latest
 
+      - name: Container write test
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          which docker
+          docker run --rm --platform linux/amd64 -v "$PWD/work/libnx32:/work" -w /work ghcr.io/vita2hos/devcontainer/vita2hos:latest bash -lc 'id; ls -ld /work /work/nx; touch /work/nx/.write_test && echo WRITE_OK && rm /work/nx/.write_test'
+
       - name: Build libnx32
         if: steps.cache.outputs.cache-hit != 'true'
         run: cd work/libnx32 && ./build.sh
@@ -62,6 +85,10 @@ jobs:
           export DCR_LIBNX32="$PWD/work/libnx32/prefix"
           export PORTLIBS32="$PWD/work/mesa32/prefix"
           sh work/runtime/tools/check.sh
+
+      - name: Give files back to the runner user
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" work || true
 
       - name: Keep build logs
         if: always()
